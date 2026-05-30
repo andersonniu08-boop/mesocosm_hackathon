@@ -1,0 +1,53 @@
+{
+  "id": "pong-summarization",
+  "adapter": "adapter.py",
+  "name": "Pong Summarization",
+  "description": "Measures a model's ability to analyze Pong source code and produce a complete structured specification covering invocation, arguments, constants, game rules, rule ordering, and error conditions.",
+
+  "binding_vow": {
+    "version": "1.0.0",
+    "tier": "tier1",
+    "description": "The agent receives the full source code of a headless deterministic Pong game. It must produce a JSON genome specifying every detail of the program: invocation template, output contract, CLI arguments (names, types, ranges), numeric constants, game rules (id, trigger, effect), rule execution order, and error conditions. The genome is scored on structural completeness — fraction of required fields and sub-fields present and well-formed.",
+
+    "observation_space": {
+      "type": "json",
+      "description": "{ \"instruction\": string, \"source_code\": string (full Pong source), \"expected_format\": object (template showing required genome structure) }"
+    },
+
+    "action_space": {
+      "type": "json",
+      "schema_ref": "{\"type\": \"object\", \"properties\": {\"invocation\": {\"type\": \"string\"}, \"output_contract\": {\"type\": \"object\", \"properties\": {\"format\": {\"type\": \"string\"}, \"on_success\": {\"type\": \"string\"}, \"on_error\": {\"type\": \"string\"}}}, \"arguments\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}, \"type\": {\"type\": \"string\"}, \"range\": {\"type\": \"array\"}, \"required\": {\"type\": \"boolean\"}, \"default\": {}}}}, \"constants\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"symbol\": {\"type\": \"string\"}, \"value\": {\"type\": \"number\"}}}}, \"rules\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"string\"}, \"trigger\": {\"type\": \"string\"}, \"effect\": {\"type\": \"string\"}}}}, \"rule_order\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"error_conditions\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"when\": {\"type\": \"string\"}, \"action\": {\"type\": \"string\"}}}}}, \"required\": [\"invocation\", \"output_contract\", \"arguments\", \"constants\", \"rules\", \"rule_order\", \"error_conditions\"]}",
+      "description": "Complete JSON genome specification of the Pong program."
+    },
+
+    "reward": {
+      "type": "scalar",
+      "range": { "low": 0.0, "high": 1.0 },
+      "description": "Fraction of structural completeness checks passed. 1.0 = all required top-level fields, arguments, constants, rules, and error conditions fully specified."
+    },
+
+    "episode": {
+      "max_steps": 1,
+      "deterministic_reset": true,
+      "supports_seed": false,
+      "parallel_episodes": 1,
+      "observability": "full"
+    },
+
+    "techniques": []
+  },
+
+  "scoring": {
+    "primary_metric": "genome_score",
+    "higher_is_better": true,
+    "metrics": [
+      {
+        "name": "genome_score",
+        "type": "episode_reward",
+        "aggregation": "mean"
+      }
+    ]
+  },
+
+  "tags": ["summarization", "code-understanding", "pong", "specification", "tier1"]
+}
