@@ -1,2 +1,0 @@
-# The Pong Summarization env uses only Python stdlib + sweat-mesocosm (bench_common).
-# No extra packages needed.

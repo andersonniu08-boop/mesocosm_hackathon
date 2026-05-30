@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 
-def levenshtein(a: str, b: str) -> int:
+def levenshtein(a, b):
     if len(a) < len(b):
         return levenshtein(b, a)
     if len(b) == 0:
@@ -12,112 +12,82 @@ def levenshtein(a: str, b: str) -> int:
     for i, ca in enumerate(a):
         curr = [i + 1]
         for j, cb in enumerate(b):
-            cost = 0 if ca == cb else 1
-            curr.append(min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost))
+            insert = prev[j + 1] + 1
+            delete = curr[j] + 1
+            sub = prev[j] + (0 if ca == cb else 1)
+            curr.append(min(insert, delete, sub))
         prev = curr
     return prev[-1]
 
 
-def run_tests(program_path: str, tests: list[dict]) -> list[dict]:
+def run_tests(program_path, tests):
     results = []
-    for t in tests:
-        cmd = [sys.executable, program_path] + t["args"]
-        expected = t["expected"]
-        expected_code = expected["exit_code"]
-        expected_keys = expected.get("stdout_keys", {})
+    for test in tests:
+        result = {"test_id": test["id"], "passed": False,
+                  "actual_stdout": "", "expected_stdout": ""}
 
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=5
+                [sys.executable, program_path] + test["args"],
+                capture_output=True, text=True, timeout=5
             )
         except subprocess.TimeoutExpired:
-            results.append({
-                "test_id": t["id"],
-                "category": t["category"],
-                "passed": False,
-                "error": "timeout",
-                "actual_stdout": "",
-                "expected_stdout": json.dumps(expected_keys),
-            })
+            results.append(result)
             continue
 
-        actual_code = proc.returncode
-        actual_stdout_raw = proc.stdout.strip()
+        expected = test["expected"]
+        result["actual_stdout"] = proc.stdout.strip()
 
-        if actual_code != expected_code:
-            results.append({
-                "test_id": t["id"],
-                "category": t["category"],
-                "passed": False,
-                "error": "exit_code_mismatch",
-                "actual_stdout": actual_stdout_raw,
-                "expected_stdout": json.dumps(expected_keys),
-            })
+        if proc.returncode != expected.get("exit_code", 0):
+            results.append(result)
             continue
 
-        if expected_code != 0:
-            results.append({
-                "test_id": t["id"],
-                "category": t["category"],
-                "passed": True,
-                "actual_stdout": "",
-                "expected_stdout": "",
-            })
+        stdout_keys = expected.get("stdout_keys")
+        if stdout_keys is None:
+            result["passed"] = True
+            result["expected_stdout"] = ""
+            results.append(result)
             continue
 
         try:
-            actual = json.loads(actual_stdout_raw)
+            actual = json.loads(proc.stdout)
         except json.JSONDecodeError:
-            results.append({
-                "test_id": t["id"],
-                "category": t["category"],
-                "passed": False,
-                "error": "stdout_not_json",
-                "actual_stdout": actual_stdout_raw,
-                "expected_stdout": json.dumps(expected_keys),
-            })
+            results.append(result)
             continue
 
-        keys_match = True
-        mismatch = None
-        for key, val in expected_keys.items():
-            if actual.get(key) != val:
-                keys_match = False
-                mismatch = key
-                break
+        result["expected_stdout"] = json.dumps(stdout_keys, sort_keys=True)
+        result["actual_stdout"] = json.dumps(actual, sort_keys=True)
 
-        results.append({
-            "test_id": t["id"],
-            "category": t["category"],
-            "passed": keys_match,
-            "error": f"key_mismatch: {mismatch}" if not keys_match else None,
-            "actual_stdout": json.dumps(actual),
-            "expected_stdout": json.dumps(expected_keys),
-        })
+        passed = True
+        for key, value in stdout_keys.items():
+            if key not in actual or actual[key] != value:
+                passed = False
+                break
+        result["passed"] = passed
+        results.append(result)
 
     return results
 
 
-def score(tests: list[dict], results: list[dict]) -> tuple[float, float]:
+def score(tests, results):
     if not results:
         return (0.0, 0.0)
 
-    total = len(results)
-    passed = sum(1 for r in results if r["passed"])
-    ff = passed / total
+    passed_count = sum(1 for r in results if r["passed"])
+    total_count = len(results)
+    ff = passed_count / total_count
 
     bs_sum = 0.0
     for r in results:
         if r["passed"]:
-            actual = r.get("actual_stdout", "")
-            expected = r.get("expected_stdout", "")
-            if actual and expected:
-                dist = levenshtein(actual, expected)
-                max_len = max(len(actual), len(expected))
-                if max_len > 0:
-                    bs_sum += 1.0 - (dist / max_len)
-            else:
+            a = r["actual_stdout"]
+            e = r["expected_stdout"]
+            if not a and not e:
                 bs_sum += 1.0
-    bs = bs_sum / total if total > 0 else 0.0
+            else:
+                dist = levenshtein(a, e)
+                denom = max(len(a), len(e))
+                bs_sum += 1.0 - (dist / denom)
+    bs = bs_sum / total_count if total_count > 0 else 0.0
 
     return (ff, bs)
