@@ -1,0 +1,710 @@
+[
+  {
+    "id": "ball_move_01",
+    "category": "ball_movement",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 105,
+        "ball_y": 200,
+        "ball_dx": 5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "ball_move_02",
+    "category": "ball_movement",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "0",
+      "--ball-dy",
+      "-5",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 100,
+        "ball_y": 195,
+        "ball_dx": 0,
+        "ball_dy": -5,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "ball_move_03",
+    "category": "ball_movement",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "-5",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 105,
+        "ball_y": 195,
+        "ball_dx": 5,
+        "ball_dy": -5,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "ball_move_04",
+    "category": "ball_movement",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "3"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 115,
+        "ball_y": 200,
+        "ball_dx": 5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "wall_top_01",
+    "category": "wall_bounce",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "2",
+      "--ball-dx",
+      "0",
+      "--ball-dy",
+      "-5",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 100,
+        "ball_y": 3,
+        "ball_dx": 0,
+        "ball_dy": 5,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "wall_bottom_01",
+    "category": "wall_bounce",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "398",
+      "--ball-dx",
+      "0",
+      "--ball-dy",
+      "5",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 100,
+        "ball_y": 397,
+        "ball_dx": 0,
+        "ball_dy": -5,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "wall_near_01",
+    "category": "wall_bounce",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "5",
+      "--ball-dx",
+      "0",
+      "--ball-dy",
+      "-2",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 100,
+        "ball_y": 3,
+        "ball_dx": 0,
+        "ball_dy": 2,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "paddle_left_01",
+    "category": "paddle_hit",
+    "args": [
+      "--ball-x",
+      "25",
+      "--ball-y",
+      "250",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 23,
+        "ball_y": 250,
+        "ball_dx": 5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "paddle_right_01",
+    "category": "paddle_hit",
+    "args": [
+      "--ball-x",
+      "575",
+      "--ball-y",
+      "300",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 577,
+        "ball_y": 300,
+        "ball_dx": -5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "paddle_miss_above_01",
+    "category": "paddle_hit",
+    "args": [
+      "--ball-x",
+      "25",
+      "--ball-y",
+      "219",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 20,
+        "ball_y": 219,
+        "ball_dx": -5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "paddle_miss_below_01",
+    "category": "paddle_hit",
+    "args": [
+      "--ball-x",
+      "25",
+      "--ball-y",
+      "281",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 20,
+        "ball_y": 281,
+        "ball_dx": -5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "score_left_01",
+    "category": "scoring",
+    "args": [
+      "--ball-x",
+      "2",
+      "--ball-y",
+      "250",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "400",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 300,
+        "ball_y": 200,
+        "ball_dx": -5,
+        "ball_dy": 0,
+        "paddle_left": 400,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 1
+      }
+    }
+  },
+  {
+    "id": "score_right_01",
+    "category": "scoring",
+    "args": [
+      "--ball-x",
+      "598",
+      "--ball-y",
+      "300",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "400",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 300,
+        "ball_y": 200,
+        "ball_dx": 5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 400,
+        "score_left": 1,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "score_blocked_01",
+    "category": "scoring",
+    "args": [
+      "--ball-x",
+      "25",
+      "--ball-y",
+      "250",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 23,
+        "ball_y": 250,
+        "ball_dx": 5,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "edge_zero_vel_01",
+    "category": "edge_cases",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "0",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 100,
+        "ball_y": 200,
+        "ball_dx": 0,
+        "ball_dy": 0,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "edge_paddle_boundary_01",
+    "category": "edge_cases",
+    "args": [
+      "--ball-x",
+      "25",
+      "--ball-y",
+      "0",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "0",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 23,
+        "ball_y": 3,
+        "ball_dx": 5,
+        "ball_dy": 0,
+        "paddle_left": 0,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 0
+      }
+    }
+  },
+  {
+    "id": "edge_corner_01",
+    "category": "edge_cases",
+    "args": [
+      "--ball-x",
+      "2",
+      "--ball-y",
+      "2",
+      "--ball-dx",
+      "-5",
+      "--ball-dy",
+      "-5",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 0,
+      "stdout_keys": {
+        "ball_x": 300,
+        "ball_y": 200,
+        "ball_dx": -5,
+        "ball_dy": 5,
+        "paddle_left": 250,
+        "paddle_right": 300,
+        "score_left": 0,
+        "score_right": 1
+      }
+    }
+  },
+  {
+    "id": "invalid_missing_arg_01",
+    "category": "invalid_input",
+    "args": [
+      "--ball-x",
+      "100",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 1
+    }
+  },
+  {
+    "id": "invalid_non_numeric_01",
+    "category": "invalid_input",
+    "args": [
+      "--ball-x",
+      "abc",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 1
+    }
+  },
+  {
+    "id": "invalid_out_of_range_01",
+    "category": "invalid_input",
+    "args": [
+      "--ball-x",
+      "99999",
+      "--ball-y",
+      "200",
+      "--ball-dx",
+      "5",
+      "--ball-dy",
+      "0",
+      "--paddle-left",
+      "250",
+      "--paddle-right",
+      "300",
+      "--score-left",
+      "0",
+      "--score-right",
+      "0",
+      "--frames",
+      "1"
+    ],
+    "expected": {
+      "exit_code": 1
+    }
+  }
+]
