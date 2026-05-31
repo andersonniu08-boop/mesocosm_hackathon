@@ -1,625 +1,617 @@
-# Software Evolution — Mesocosm Benchmark Plan
-
-A Mesocosm evaluation environment that measures a model's ability to understand software precisely enough that another model can rebuild it from the description alone.
+# Software Evolution — Mesocosm Redesign Plan
 
 ---
 
-## 1. What This Measures
+## Phase 1: Repository Analysis
 
-A model receives source code. It produces a genome (structured JSON spec). A fixed reconstructor (GPT-4o) rebuilds the program from the genome alone. The rebuild is tested against a private test suite. The model's score is the fraction of tests the rebuild passes.
+### swecc-core Architecture
 
-The question: given only source code, can a model produce a spec precise enough that a different model can faithfully rebuild working software from it? This is the software equivalent of technical handoffs between teams. It measures informational precision of model understanding — how much meaning survives transmission.
+The swecc-core monorepo contains the **BenchAnything / Mesocosm platform** — an LLM evaluation system for benchmarking models against environments. Key architecture:
+
+| Component | Location | Role |
+|---|---|---|
+| `BaseEnv` | `bench_common/env_sdk/base.py` | Abstract class env authors subclass. Must implement `reset(seed, **params) -> dict` and `step(action) -> StepResult`. Optional: `close()`, `render()`, `parse_action()`. |
+| `StepResult` | `bench_common/env_sdk/base.py` | Dataclass: `observation`, `reward`, `terminated`, `truncated`, `info`, `system_prompt`, `content_type`. |
+| `serve()` | `bench_common/env_sdk/server.py` | One-line HTTP adapter: wraps any `BaseEnv` into the 5-endpoint protocol (`/health`, `/reset`, `/step`, `/close`, `/render`). |
+| `DomainConfig` | `bench_common/env_sdk/registration.py` | Python-side of `benchanything.json`. Contains `id`, `name`, `binding_vow`, `endpoint`, `scoring`, `tags`. |
+| `BindingVow` | `bench_common/core/binding_vow.py` | Typed contract: `observation_space` (SpaceSpec), `action_space` (SpaceSpec), `reward` (RewardSpec), `episode` (EpisodeSemantics), `techniques[]`. |
+| `ScoringConfig` | `bench_common/core/scoring.py` | `primary_metric`, `metrics[]` (MetricDef with name, type, aggregation). Supported types: `episode_reward`, `terminal_field`. |
+| `AgentLoop` | `bench_common/runtime/agent_loop.py` | Platform's execution engine. Calls `reset()` → loop: `LLM inference` → `step(action)` → check termination → `close()`. |
+| `HttpEnvClient` | `bench_common/runtime/env_client.py` | Platform's async HTTP client speaking the 5-endpoint protocol. |
+| `compute_scores()` | `bench_common/eval/metrics.py` | Aggregates episode results per MetricDef (mean, median, max, min, sum, pass_rate). |
+| `Technique` | `bench_common/techniques/base.py` | Hook system for memory, tool-calling, multi-agent. Injects context before/after each step. |
+
+**Critical constraint**: The env author writes `BaseEnv.reset()` and `BaseEnv.step()`. **The platform does everything else** — LLM inference, agent loop, scoring aggregation, leaderboard, run management. The env is NOT a simulation engine or pipeline orchestrator. It is a Gym-like environment exposed over HTTP.
+
+**Episode lifecycle (platform view)**:
+```
+POST /reset {episode_id, seed}
+  → env.reset(seed) → returns initial observation dict
+LOOP:
+  LLM inference (structured output per action_space schema)
+  → POST /step {episode_id, action}
+    → env.step(action) → StepResult(obs, reward, terminated, truncated, info)
+    → if terminated or truncated: exit loop
+POST /close {episode_id}
+  → env.close()
+SCORE: compute_scores(scoring_config, [episodes])
+```
+
+### arithmetic-env Architecture (Reference Implementation)
+
+A 5-file repository. The canonical Mesocosm env pattern:
+
+| File | Purpose |
+|---|---|
+| `benchanything.json` | Manifest at repo root: id, name, binding_vow (obs/action/reward space specs, episode semantics), scoring config, tags. The platform reads this from the repo root on submission. |
+| `env.py` | `ArithmeticEnv(BaseEnv)`: `reset(seed)` generates 10 problems deterministically, `step(action)` checks `action["answer"]` against ground truth, advances to next problem. ~80 lines. |
+| `adapter.py` | `serve(ArithmeticEnv, port=8765)` — 10-line HTTP wrapper. Platform calls this to reach the env. |
+| `requirements.txt` | Extra pip deps beyond `swecc-mesocosm`. Arithmetic uses stdlib only — file is empty except comments. |
+| `LOCAL_DEV.md` | Development walkthrough: setup, local testing with Ollama, platform submission, Docker workflow. |
+| `showcase/` | Replay export examples for demo frontends. |
+
+**Episode flow** (10-step episode):
+```
+reset(seed=42) → {"problem": "12 + 7", "problem_num": 1, "total_problems": 10}
+step({"answer": 19}) → StepResult(obs={"problem": "8 * 3", ...}, reward=1.0, terminated=False)
+... 8 more steps ...
+step({"answer": 7}) → StepResult(obs={"result": "done", "score": "8/10"}, reward=1.0, terminated=True)
+```
+
+**Key patterns from arithmetic-env**:
+1. Observations are plain dicts (JSON-serializable)
+2. Actions use `schema_ref` so LLMs produce structured output
+3. Reward is per-step (1.0 correct, 0.0 wrong) — episode-level score = mean reward
+4. `deterministic_reset=true` with seed support for reproducibility
+5. All `info` dict values MUST be strings (enforced by adapter server)
+6. `max_steps` declared in binding vow matches env logic
+7. `episode_reward` metric type with `mean` aggregation for scoring
+8. The env is ~80 lines — trivial once you understand the pattern
+
+### Environment Lifecycle
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  env.py      │────▶│  adapter.py  │────▶│  Platform    │
+│  (BaseEnv)   │◀────│  (HTTP)      │◀────│  (AgentLoop) │
+└──────────────┘     └──────────────┘     └──────────────┘
+```
+
+The env IS the deliverable. Not the dashboard. Not the runner. Not the leaderboard. The platform provides those.
 
 ---
 
-## 2. Tier 1 — Single-Cycle Evaluation (MUST SHIP)
+## Phase 2: Compatibility Review
 
-### Pipeline
+### What the current PLAN.md gets wrong
 
-```
-Source Code (human-written Pong, ~100 lines)
-        │
-        ▼
-┌──────────────────────────┐
-│ MODEL UNDER TEST          │
-│ Sees: source code only    │
-│ Produces: genome JSON     │
-│ Max tokens: per heat level│
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│ SPEC VALIDATOR            │
-│ Valid JSON?               │
-│ All required fields?      │
-│ Fields non-empty?         │
-│ Within token budget?      │
-│ Fail → re-prompt (1x)     │
-│ Fail again → score = 0    │
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│ REFERENCE RECONSTRUCTOR   │
-│ Fixed: GPT-4o, temp 0     │
-│ Sees: genome only         │
-│ Fills gaps on its own     │
-│ Produces: source code     │
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│ BUILD CHECK               │
-│ Does it compile?          │
-│ No → score = 0            │
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│ SANDBOX TEST RUNNER       │
-│ 20 private test scenarios │
-│ subprocess.run() per test │
-│ 5s timeout, temp dir      │
-│ No network, no filesystem │
-│ Captures stdout JSON      │
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│ SCORING                   │
-│ FF = passed / 20          │
-│ BS = mean output closeness│
-│ (edit distance on stdout) │
-└──────────────────────────┘
-```
+| # | Problem | Why it matters | Fix |
+|---|---|---|---|
+| **1** | **Multiple internal model calls.** The design calls GPT-4o inside `reference.py` as a "reconstructor." The env has `environment.py` orchestrating both a "summarizer" model call AND a "reconstructor" model call. | In Mesocosm, the env does NOT call models. The platform calls exactly ONE model per step. The env only implements `reset()` and `step()`. This is the single biggest architectural misunderstanding. | Remove `reference.py`, remove all internal model calls. The model under test is the sole agent. The env is a state machine that presents observations and evaluates actions. |
+| **2** | **Model adapters (`adapters/deepseek.py`, `adapters/claude.py`, `adapters/openai.py`).** The plan builds its own model abstraction layer and API clients. | The platform handles all LLM inference via litellm. Env authors do NOT write model adapters. The platform submits any model (gemini, claude, deepseek, gpt) through a uniform interface. | Delete the entire `adapters/` directory. The platform does this. |
+| **3** | **Custom orchestrator (`environment.py`, `run.py`, `rank.py`).** The plan builds its own benchmark harness with CLI entry points and result ranking. | The platform provides `mesocosm run create` and the leaderboard. Env authors do not build experiment runners. | Replace `environment.py` with a proper `env.py` that extends `BaseEnv`. Delete `run.py` and `rank.py`. |
+| **4** | **Prompts directory (`prompts/summarizer.txt`, `prompts/reconstructor.txt`).** System prompts stored as files for the env to inject into model calls. | The platform manages prompts. The env's binding vow defines observation space descriptions that guide the agent. If needed, `system_prompt` can be set in the reset/step result. | Remove `prompts/` directory. Embed instructional context in observation fields and the binding vow description. |
+| **5** | **`benchanything.json` as an afterthought.** Listed at step 13 in implementation order, after all the custom infrastructure is built. | `benchanything.json` is the FIRST thing that defines the env. It declares the contract (observation space, action space, reward, scoring). Everything else conforms to it. | Design `benchanything.json` FIRST, then implement `env.py` to fulfill that contract. |
+| **6** | **Single-step episode (`max_steps: 1`).** The plan has the model produce a genome, the env reconstructs via GPT-4o, and the episode ends. | This throws away Mesocosm's multi-step capability. A 1-step episode where the env does all the work isn't measuring the model — it's measuring GPT-4o. | Use multi-step episodes where the model alternates between compression and reconstruction. Each step is a model action. |
+| **7** | **`spec_validator.py` with re-prompt logic.** The plan validates genomes and re-prompts the model on failure. | The env cannot re-prompt the model. The env can only return observations and rewards. The model decides what to do next based on those. | Replace validation with reward shaping: invalid genomes get penalty reward and the same observation again, giving the model a chance to correct. |
 
-### The Genome (What the Model Produces)
+### What the current plan gets right
 
-The genome is a structured JSON specification. It replaces the old 5-field prose schema (purpose, interfaces, behavior, constraints, dependencies) with 8 typed, atomic fields that degrade gracefully under budget pressure.
+| Element | Status | Notes |
+|---|---|---|
+| Pong fixture (`fixtures/pong/source.py`) | Good | Deterministic, headless, JSON I/O. Excellent source program candidate. |
+| Test scenarios (`fixtures/pong/tests.json`) | Good | 20 well-categorized test cases. Can be used for functional fidelity scoring. |
+| `test_harness.py` | Good | `run_tests()` and `score()` are clean. Can be imported by `env.py` for functional evaluation. |
+| Genome schema design | Interesting | The 8-field structured JSON genome is a reasonable compression format. Can be simplified for MVP. |
 
+### Removed vs Kept
+
+| Removed | Kept (repurposed) |
+|---|---|
+| `adapters/` (entire directory) | `fixtures/pong/` — becomes one of the source programs |
+| `environment.py` | `test_harness.py` — used inside `env.py` for functional scoring |
+| `run.py` | Pong source code — observation content |
+| `rank.py` | |
+| `reference.py` | |
+| `spec_validator.py` | |
+| `prompts/` | |
+| `environment_multi.py` | |
+
+---
+
+## Phase 3: Environment Design
+
+### Core Concept
+
+**The environment presents source code. The model compresses it to a genome. Then the model reconstructs from that genome. The cycle repeats for multiple generations. Fidelity degrades — measuring how well the model preserves information across repeated compression-decompression cycles.**
+
+Each generation = 2 steps:
+1. **Compress step**: Model sees source → produces genome
+2. **Reconstruct step**: Model sees genome → produces reconstruction
+
+The reconstruction becomes the source for the next generation. After N generations, the episode ends. Score = mean fidelity across generations.
+
+### Observation Space
+
+**Compress phase observation** (`phase: "compress"`):
 ```json
 {
-  "invocation": "python pong.py --ball-x <int> --ball-y <int> --ball-dx <int> --ball-dy <int> --paddle-left <int> --paddle-right <int> --score-left <int> --score-right <int> --frames <int>",
-  "output_contract": {
-    "format": "json",
-    "on_success": "print all state vars as JSON to stdout, exit 0",
-    "on_error": "exit 1, no stdout"
-  },
-  "arguments": [
-    {"name": "ball-x", "type": "integer", "range": [0, 600], "required": true, "default": null},
-    {"name": "ball-y", "type": "integer", "range": [0, 400], "required": true, "default": null},
-    {"name": "ball-dx", "type": "integer", "required": true, "default": null},
-    {"name": "ball-dy", "type": "integer", "required": true, "default": null},
-    {"name": "paddle-left", "type": "integer", "range": [0, 400], "required": true, "default": null},
-    {"name": "paddle-right", "type": "integer", "range": [0, 400], "required": true, "default": null},
-    {"name": "score-left", "type": "integer", "required": true, "default": null},
-    {"name": "score-right", "type": "integer", "required": true, "default": null},
-    {"name": "frames", "type": "integer", "required": true, "default": null}
-  ],
-  "constants": [
-    {"symbol": "FIELD_WIDTH", "value": 600},
-    {"symbol": "FIELD_HEIGHT", "value": 400},
-    {"symbol": "PADDLE_LENGTH", "value": 60},
-    {"symbol": "PADDLE_LEFT_X", "value": 20},
-    {"symbol": "PADDLE_RIGHT_X", "value": 580},
-    {"symbol": "BALL_SIZE", "value": 6},
-    {"symbol": "BALL_RADIUS", "value": 3},
-    {"symbol": "HALF_PADDLE", "value": 30}
-  ],
-  "rules": [
-    {
-      "id": "move_ball",
-      "trigger": "each frame",
-      "effect": "ball_x += ball_dx * frames; ball_y += ball_dy * frames"
+  "phase": "compress",
+  "generation": 1,
+  "max_generations": 5,
+  "source_code": "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)",
+  "source_length": 89,
+  "budget_chars": 60
+}
+```
+
+**Reconstruct phase observation** (`phase: "reconstruct"`):
+```json
+{
+  "phase": "reconstruct",
+  "generation": 1,
+  "max_generations": 5,
+  "genome": "fib(n):0,1->n<2?n:f(n-1)+f(n-2)",
+  "genome_length": 35,
+  "original_source_length": 89
+}
+```
+
+### Action Space
+
+A single unified action schema (the model fills whichever field is relevant to the current phase):
+```json
+{
+  "type": "object",
+  "properties": {
+    "genome": {
+      "type": "string",
+      "description": "Compressed representation of the source code."
     },
-    {
-      "id": "wall_bounce_top",
-      "trigger": "ball_y - BALL_RADIUS <= 0",
-      "effect": "ball_dy = abs(ball_dy); ball_y = BALL_RADIUS"
-    },
-    {
-      "id": "wall_bounce_bottom",
-      "trigger": "ball_y + BALL_RADIUS >= FIELD_HEIGHT",
-      "effect": "ball_dy = -abs(ball_dy); ball_y = FIELD_HEIGHT - BALL_RADIUS"
-    },
-    {
-      "id": "left_paddle_hit",
-      "trigger": "ball_x - BALL_RADIUS <= PADDLE_LEFT_X AND |ball_y - paddle_left| <= HALF_PADDLE",
-      "effect": "ball_dx = abs(ball_dx); ball_x = PADDLE_LEFT_X + BALL_RADIUS"
-    },
-    {
-      "id": "right_paddle_hit",
-      "trigger": "ball_x + BALL_RADIUS >= PADDLE_RIGHT_X AND |ball_y - paddle_right| <= HALF_PADDLE",
-      "effect": "ball_dx = -abs(ball_dx); ball_x = PADDLE_RIGHT_X - BALL_RADIUS"
-    },
-    {
-      "id": "left_scoring",
-      "trigger": "ball_x + BALL_RADIUS <= 0",
-      "effect": "score_right += 1; ball_x = FIELD_WIDTH/2; ball_y = FIELD_HEIGHT/2; ball_dx = 5; ball_dy = 0"
-    },
-    {
-      "id": "right_scoring",
-      "trigger": "ball_x - BALL_RADIUS >= FIELD_WIDTH",
-      "effect": "score_left += 1; ball_x = FIELD_WIDTH/2; ball_y = FIELD_HEIGHT/2; ball_dx = -5; ball_dy = 0"
+    "reconstruction": {
+      "type": "string",
+      "description": "Reconstructed source code from the genome."
     }
-  ],
-  "rule_order": [
-    "move_ball", "wall_bounce_top", "wall_bounce_bottom",
-    "left_paddle_hit", "right_paddle_hit",
-    "left_scoring", "right_scoring"
-  ],
-  "error_conditions": [
-    {"when": "any required argument is missing", "action": "exit 1"},
-    {"when": "any argument is not a valid integer", "action": "exit 1"}
+  },
+  "anyOf": [
+    {"required": ["genome"]},
+    {"required": ["reconstruction"]}
   ]
 }
 ```
 
-### Why This Schema (vs the Old 5-Field Schema)
+`parse_action()` routes based on current phase: compress phase reads `genome`, reconstruct phase reads `reconstruction`.
 
-| Old field | Problem | New design | Why better |
-|-----------|---------|------------|------------|
-| `purpose` (prose) | Zero reconstruction utility. Wasted tokens. | Removed entirely. | — |
-| `interfaces` (prose) | Vague. "List CLI arguments" doesn't specify types or ranges. | `invocation` + `arguments[]` + `output_contract` | Each argument is typed, has range, has required/default. Independently compressible. |
-| `behavior` (prose) | Monolithic blob. Dropping a sentence breaks logical coherence. | `rules[]` + `rule_order[]` | Each rule is an atomic trigger/effect pair. Dropping one rule breaks one feature, not the whole program. Graceful degradation. |
-| `constraints` (prose) | Conflates invariants, error conditions, and numeric limits into one blob. | `constants[]` + `error_conditions[]` | Constants are typed (symbol + value). Error conditions are atomic trigger/action pairs. Separable. |
-| `dependencies` | Lists imports without usage context. | Implicit in invocation and rules. | The reconstructor prompt tells GPT-4o what stdlib is available. Explicit listing adds noise. |
-| *(new)* | No data flow described. | `rule_order[]` | Tells the reconstructor the pipeline: what fires first, second, third. Critical for correct behavior when rules interact. |
-| *(new)* | No state vocabulary. | `state_vars[]` (in full genome) | Gives the reconstructor variable names for internal state beyond arguments. |
+### Reward Function
 
-### Graceful Degradation
+| Step type | Reward | Formula |
+|---|---|---|
+| **Compress** | Budget adherence | `1.0` if genome within budget, `0.0` if over |
+| **Reconstruct** | Fidelity | `normalized_edit_similarity(source, reconstruction)` — range [0, 1] |
 
-Under budget pressure, the model drops fields in this priority order (lowest first):
+`normalized_edit_similarity(a, b) = 1 - levenshtein(a, b) / max(len(a), len(b))`
 
-1. Drop individual rules (keep most critical ones)
-2. Drop `rule_order` (reconstructor infers from dependencies)
-3. Drop argument sub-fields (`range`, `default`) — keep `name` and `type`
-4. Drop individual constants (least critical first)
-5. Drop `error_conditions`
-6. **NEVER drop** `invocation`, `output_contract`, or the first constant
+This produces a per-step reward of 0–1. Episode total_reward = sum of all step rewards. Since episodes have a fixed number of steps (2×max_generations), the mean reward is directly comparable across runs.
 
-Each field dropped causes a predictable, small FF reduction. The degradation curve is smooth, not a cliff.
-
-### Scoring
-
-**Functional Fidelity (FF)** — Primary. Range 0–1.
-
-```
-FF = passed_tests / 20
-```
-
-A test passes when: exit code matches expected, and the JSON fields in `stdout_keys` match the actual output exactly. 20 private scenarios across 6 categories (ball movement, wall bounce, paddle hit, scoring, edge cases, invalid input).
-
-**Behavioral Similarity (BS)** — Secondary. Range 0–1.
-
-```
-BS = mean over passing tests: 1 - edit_distance(actual_stdout, expected_stdout) / max(|actual|, |expected|)
-```
-
-Failed tests contribute 0 to the BS average.
-
-### Heat Levels
-
-| Heat | Token Budget | Meaning |
-|------|-------------|---------|
-| 0 | Unlimited | Baseline. Saturate. Measures ceiling FF. |
-| 1 | 500 | Standard. Moderate constraint. |
-| 2 | 300 | Compression. Must prioritize what to keep. |
-| 3 | 150 | Extreme. Below information-theoretic floor. Measures degradation quality. |
-
-### Tier 1 Leaderboard
-
-```
-Rank | Model       | FF   | BS
------|-------------|------|------
-  1  | Claude      | 0.95 | 0.91
-  2  | DeepSeek    | 0.85 | 0.82
-  3  | GPT-4       | 0.75 | 0.73
-```
-
-Ranked by FF. Ties broken by BS.
-
----
-
-## 3. Tier 2 — Multi-Generation Evolution (STRETCH)
-
-### The Loop
-
-Each rebuild becomes the next generation's source code. Token budget shrinks. Temperature ramps. The software evolves, degrades, or collapses.
-
-```
-Gen 0: Original Pong → [Summarizer] → Genome 0 → [Reconstructor] → Rebuild 0 → Test: FF=1.00
-Gen 1: Rebuild 0   → [Summarizer] → Genome 1 → [Reconstructor] → Rebuild 1 → Test: FF=0.96
-Gen 2: Rebuild 1   → [Summarizer] → Genome 2 → [Reconstructor] → Rebuild 2 → Test: FF=0.91
-Gen 3: Rebuild 2   → [Summarizer] → Genome 3 → [Reconstructor] → Rebuild 3 → Test: FF=0.82
-Gen 4: Rebuild 3   → [Summarizer] → Genome 4 → [Reconstructor] → Rebuild 4 → Test: FF=0.71
-Gen 5: Rebuild 4   → [Summarizer] → Genome 5 → [Reconstructor] → Rebuild 5 → Test: FF=0.63
-Gen 6: Rebuild 5   → [Summarizer] → Genome 6 → [Reconstructor] → Rebuild 6 → Test: FF=0.55
-Gen 7: Rebuild 6   → [Summarizer] → Genome 7 → [Reconstructor] → Rebuild 7 → Test: FF=0.48
-Gen 8: Rebuild 7   → [Summarizer] → Genome 8 → [Reconstructor] → Rebuild 8 → Test: FF=0.41
-Gen 9: Rebuild 8   → [Summarizer] → Genome 9 → [Reconstructor] → Rebuild 9 → Test: FF=0.37
-```
-
-### Software Half-Life (HL)
-
-The generation where the 5-generation rolling average of FF drops below 0.50. This is the number of AI-mediated handoffs the software survives before its behavior degrades beyond recognition.
-
-```
-Gen | FF    | 5-Gen Rolling Avg
-----|-------|------------------
-0   | 1.00  | -
-1   | 0.96  | -
-2   | 0.91  | -
-3   | 0.82  | -
-4   | 0.71  | 0.880
-5   | 0.63  | 0.806
-6   | 0.55  | 0.724
-7   | 0.48  | 0.638
-8   | 0.41  | 0.556
-9   | 0.37  | 0.488  ← HL = 7 (center of the 5-gen window)
-```
-
-Why rolling average: a single bad genome (random LLM output) shouldn't kill the run. The average smooths noise and measures the sustained trend.
-
-Why 0.50: below 50% of tests passing, the software has lost more behavior than it's retained. It's no longer recognizable as the original program.
-
-### Extinction Generation
-
-The generation where FF hits exactly 0. A secondary metric for when the software dies completely.
-
-### Collapse Recovery
-
-When FF drops to 0, the code resets to the original source. Budget resets to 500 tokens. Temperature resets to 0.1. This tests whether the model can recover from collapse or whether the environment fatally destabilizes.
-
-### Evolutionary Pressure (Multi-Axis)
-
-A single pressure axis (budget shrinking) measures ONE thing. Multiple axes produce a richer fitness profile.
-
-| Pressure Axis | How It Works | What It Measures |
-|---------------|-------------|------------------|
-| **Budget** | Tokens shrink 5% per generation (floor at 50) | Information triage quality under scarcity |
-| **Temperature** | T ramps 0.1 → 0.3 → 0.5 → 0.7 across generations | Robustness to stochastic noise (mutations) |
-| **Reconstructor Switch** | Every 10 generations, swap GPT-4o → Claude and back | Cross-model portability of the genome |
-| **Silent Mutation** | After summarization, randomly corrupt 10% of genome fields before reconstruction | Error correction capability |
-| **Field Lock** | Some genome fields are locked — summarizer can only modify unlocked fields | Innovation within constraints |
-
-### Fitness Score
-
-Mean of all half-life scores across all pressure axes.
-
-```
-Rank | Model    | HL_budget | HL_temp | HL_recon | HL_mutate | Fitness
------|----------|-----------|---------|----------|-----------|--------
-  1  | Claude   | 42        | 38      | 35       | 29        | 36.0
-  2  | DeepSeek | 37        | 41      | 22       | 31        | 32.8
-  3  | GPT-4    | 24        | 28      | 18       | 19        | 22.3
-```
-
-This prevents a model hyper-optimized for one pressure from dominating. Different models have different weaknesses. A multi-axis benchmark finds them all.
-
-### Minimum Viable Pressure Set for Hackathon
-
-If all five axes are too much, ship these two:
-
-1. **Budget shrinkage** — already designed, easy to implement
-2. **Reconstructor switch every 10 generations** — requires two reconstructor models, low implementation cost
-
-### Tier 2 Leaderboard
-
-```
-Rank | Model       | Half-Life | Extinction | FF@10 | FF@25 | Fitness
------|-------------|-----------|------------|-------|-------|--------
-  1  | Claude      | 42        | 55         | 0.94  | 0.71  | 36.0
-  2  | DeepSeek    | 37        | 40         | 0.91  | 0.64  | 32.8
-  3  | GPT-4       | 24        | 28         | 0.82  | 0.36  | 22.3
-```
-
-Ranked by Half-Life. Ties broken by Extinction. Second tie broken by mean FF across all generations.
-
-### Sigmoid Budget Curve
-
-Percentage-based shrinking (5%/gen) is too gradual at first and too aggressive at the end. Use a sigmoid:
-
-```
-budget(gen) = floor + (start - floor) × (1 / (1 + e^(k × (gen - midpoint))))
-```
-
-Where `k` controls steepness, `midpoint` is where half the budget is gone, `floor` prevents collapse to zero. This ramps up smoothly and stabilizes.
-
----
-
-## 4. Pong Fixture
-
-### What It Is
-
-A headless, deterministic Pong game. No GUI. No randomness. One frame per CLI invocation. The program computes one frame and exits.
-
-### CLI Interface
-
-```
-python pong.py \
-  --ball-x 100 --ball-y 200 --ball-dx 5 --ball-dy 0 \
-  --paddle-left 250 --paddle-right 300 \
-  --score-left 0 --score-right 0 \
-  --frames 1
-```
-
-### What It Computes (Per Frame)
-
-1. Move ball: `ball_x += ball_dx`, `ball_y += ball_dy`
-2. Wall bounce (top): if `ball_y - BALL_RADIUS <= 0`, flip `ball_dy`, clamp position
-3. Wall bounce (bottom): if `ball_y + BALL_RADIUS >= FIELD_HEIGHT`, flip `ball_dy`, clamp position
-4. Left paddle hit: if ball reaches `PADDLE_LEFT_X` and Y is within paddle range, flip `ball_dx`
-5. Right paddle hit: if ball reaches `PADDLE_RIGHT_X` and Y is within paddle range, flip `ball_dx`
-6. Left scoring: if ball past left edge, right scores +1, ball resets to center
-7. Right scoring: if ball past right edge, left scores +1, ball resets to center
-8. Print resulting state as JSON to stdout, exit 0
-
-### Constants
-
-```
-FIELD_WIDTH = 600
-FIELD_HEIGHT = 400
-PADDLE_LENGTH = 60
-PADDLE_LEFT_X = 20
-PADDLE_RIGHT_X = 580
-BALL_SIZE = 6
-BALL_RADIUS = 3
-HALF_PADDLE = 30
-```
-
-### Test Scenarios (20 Total, 3-4 Per Category)
-
-| Category | Tests | What It Covers |
-|----------|-------|----------------|
-| Ball movement | 4 | Move right, move left, move diagonal, move multiple frames |
-| Wall bounce | 3 | Hit top wall, hit bottom wall, approach wall without bounce |
-| Paddle hit | 4 | Left paddle center, right paddle center, miss paddle above, hit paddle edge |
-| Scoring | 3 | Left edge score (right gets point), right edge score (left gets point), paddle blocks score |
-| Edge cases | 4 | Zero velocity, ball at corner, paddle at boundary, ball at exact paddle boundary |
-| Invalid input | 2 | Missing required argument, non-numeric argument |
-
-### Test Format
+### Scoring Configuration
 
 ```json
 {
-  "id": "ball_move_01",
-  "category": "ball_movement",
-  "args": ["--ball-x", "100", "--ball-y", "200", "--ball-dx", "5", "--ball-dy", "0",
-            "--paddle-left", "250", "--paddle-right", "300",
-            "--score-left", "0", "--score-right", "0", "--frames", "1"],
-  "expected": {
-    "exit_code": 0,
-    "stdout_keys": {
-      "ball_x": 105, "ball_y": 200, "ball_dx": 5, "ball_dy": 0,
-      "score_left": 0, "score_right": 0
-    }
-  }
-}
-```
-
-`args` is a flat list — what `subprocess.run()` takes. `stdout_keys` lists only the fields to check. Extra fields in output are ignored. Invalid-input tests have `exit_code: 1` and no `stdout_keys`.
-
----
-
-## 5. Implementation Plan
-
-### What We Already Have
-
-| File | Status |
-|------|--------|
-| `fixtures/pong/source.py` | Done — headless deterministic Pong (102 lines) |
-| `fixtures/pong/tests.json` | Done — 20 test scenarios (20/20 pass) |
-| `test_harness.py` | Done — `run_tests()` + `score()` (FF + BS) |
-
-### Tier 1 — What We Need
-
-| # | File | Does What |
-|---|------|-----------|
-| 1 | `prompts/summarizer.txt` | System prompt for the model under test. Tells it to analyze source code and produce the 8-field genome JSON. Includes the priority guide for graceful degradation: drop rules first, then rule_order, then arg sub-fields, then constants, then error_conditions. **Never drop invocation or output_contract.** Tone: pure technician, no roleplay. Return ONLY valid JSON, no markdown, no explanation. |
-| 2 | `prompts/reconstructor.txt` | System prompt for GPT-4o (the fixed reconstructor). Tells it to rebuild Python code from the genome. Includes a **translation table**: `\|ball_dy\|` → `abs(ball_dy)`, `×` → `*`, `AND` → `and`. Includes **fallback rules** for each field if missing: order → infer from dependencies, constant → guess reasonable value, error_conditions → only validate required args. Tells it to use `argparse` or manual parsing. Output contract: JSON to stdout, exit 0/1. Return ONLY source code, no markdown fences. |
-| 3 | `reference.py` | `reconstruct(genome_dict) → str`. Calls GPT-4o with the reconstructor prompt + the genome JSON. Strips markdown code fences. Retries up to 2x if build check fails. Temperature 0. |
-| 4 | `spec_validator.py` | `validate_spec(spec_str, budget) → (is_valid, error_message, parsed_dict)`. Checks: valid JSON, all 8 required fields present, fields non-empty (no TBD/TODO/N/A placeholders), token count within budget + 20. |
-| 5 | `environment.py` | `SummarizationEnv`. Orchestrator class. Constructor takes fixture_dir, model (AbstractModel), heat_level. `run()` method: loads source → calls model.summarize(source, budget) → validates genome (re-prompt once on failure) → calls reference.reconstruct(genome) → writes code to temp file → checks if code compiles → runs test_harness → returns result dict with FF, BS, token count, build status, heat, model, fixture. ~100 lines. |
-| 6 | `run.py` | CLI entry point. `python run.py --model deepseek --heat 1 --fixture fixtures/pong`. Loads the model adapter, creates SummarizationEnv, runs it, saves result JSON to `results/<model>_heat<heat>.json`, prints FF/BS. ~40 lines. |
-| 7 | `adapters/base.py` | `AbstractModel(ABC)`. One abstract method: `summarize(source_code: str, budget: int) -> dict`. |
-| 8 | `adapters/deepseek.py` | DeepSeek adapter. Calls DeepSeek API (OpenAI-compatible, base_url=https://api.deepseek.com). Loads summarizer prompt. Sends source + budget. Returns parsed genome dict. ~30 lines. |
-| 9 | `adapters/claude.py` | Claude adapter. Uses Anthropic SDK. Same pattern. ~30 lines. |
-| 10 | `adapters/openai.py` | OpenAI adapter. Uses OpenAI SDK. Same pattern. ~25 lines. |
-| 11 | `rank.py` | Reads all JSON files in `results/`. Prints leaderboard table sorted by FF desc, BS desc. ~25 lines. |
-
-### Tier 2 — What We Need (After Tier 1 Works)
-
-| # | File | Does What |
-|---|------|-----------|
-| 12 | `environment_multi.py` | `MultiGenEnv(SummarizationEnv)`. Subclass that overrides `run()` with a recursive loop. `run(generations=50)`: loads original source → for each generation, calls model.summarize(code, budget), calls reconstruct(genome), runs tests, records FF/BS/token_count/temperature, updates code to the rebuild, shrinks budget, ramps temperature. Supports multiple pressure axes via a `Pressure` protocol. Returns half-life, extinction, and full trajectory. ~100 lines. |
-| 13 | `benchanything.json` | Mesocosm registration. Declares: benchmark name, version, track (agi-real-world-modeling), primary metric (functional_fidelity), secondary metric (behavioral_similarity), extended metrics (software_half_life), 7 heat levels (0-6, 0-3 for Tier 1, 4-6 for Tier 2), observation space (source_code + token_budget), action space (genome JSON), reward (FF). |
-
----
-
-## 6. Prompt Design
-
-### `prompts/summarizer.txt`
-
-```
-You are analyzing source code to produce a machine-readable specification.
-Your output will be given to a code generator that rebuilds the program.
-The generator sees ONLY your specification — never the original source.
-
-Produce valid JSON with these fields:
-
-  invocation       — exact CLI command template (e.g. "python pong.py --ball-x <int> …")
-  output_contract  — success output format and error behavior
-                     { format: "json", on_success: string, on_error: string }
-  arguments[]      — for each CLI argument:
-                     { name, type (integer|float|string|boolean), range [min,max],
-                       required (true|false), default (value|null) }
-  constants[]      — every hardcoded number the program depends on:
-                     { symbol, value }
-  rules[]          — one object per piece of logic:
-                     { id, trigger (when it fires), effect (what changes) }
-                     Write effects as pseudo-code. Use variable names from arguments.
-                     Each rule must be independently meaningful — don't write
-                     "same as rule X but for the other side."
-  rule_order[]     — the order rules fire in (list of rule ids)
-  error_conditions[] — when the program exits 1 and what triggers it:
-                     { when, action }
-
-PRIORITY GUIDE — if token budget is tight, drop fields in this order:
-  1. Drop individual rules (keep most critical ones)
-  2. Drop rule_order (generator will infer)
-  3. Drop argument sub-fields (range, default) — keep name and type
-  4. Drop individual constants (least critical ones first)
-  5. Drop error_conditions
-  6. NEVER drop invocation, output_contract, or the first constant
-
-Return ONLY valid JSON. No explanation. No markdown fences.
-```
-
-### `prompts/reconstructor.txt`
-
-```
-You are rebuilding a program from a structured specification.
-You have NO access to the original source code.
-
-The specification has these possible fields:
-  invocation, output_contract, arguments[], constants[], rules[], rule_order[], error_conditions[]
-
-BUILDING RULES:
-  Translate each rule's effect literally into Python code.
-  A rule that says "ball_x += ball_dx" becomes: ball_x += ball_dx
-  A rule that says "ball_dy = |ball_dy|" becomes: ball_dy = abs(ball_dy)
-  A rule that says "exit 1" becomes: sys.exit(1)
-  Use AND / OR as Python and / or.
-
-HANDLING MISSING FIELDS:
-  - If rule_order is missing: order rules by dependencies (write-after-read ordering)
-  - If a constant is missing: GUESS a reasonable value (e.g. FIELD_WIDTH → 600)
-  - If error_conditions are missing: only validate required args are present and numeric
-  - If range is missing for an argument: use widest reasonable range
-  - If arguments are incomplete: treat every listed argument as required
-
-GENERAL RULES:
-  - Use argparse or manual sys.argv parsing (your choice)
-  - Print JSON to stdout on success, exit 0
-  - Exit 1 (no stdout) on any error condition
-  - Use CONSTANTS exactly as specified — do not change values
-  - If a rule is ambiguous, pick the most reasonable interpretation
-
-Return ONLY the source code. No explanation. No markdown fences.
-No "```python" wrapping — just the raw code.
-```
-
----
-
-## 7. What Information Should and Should Not Survive Compression
-
-### MUST Survive (Conserve Aggressively)
-
-| Information | Why |
-|---|---|
-| Argument names and types | The test harness invokes with specific flag names. Wrong name = FF=0. |
-| All numeric constants | Exact values. `PADDLE_LEFT_X=20` vs `30` changes collision behavior. |
-| Output contract | "JSON to stdout, exit 0" is non-negotiable for the harness. |
-| Rule effects | `ball_dx = abs(ball_dx)` must survive. If effects are lost, behavior is lost. |
-| Exit conditions | The reconstructor needs to know when to exit 1 vs 0. |
-
-### CAN Mutate Freely (No Need to Preserve)
-
-| Information | Why Safe to Lose |
-|---|---|
-| Internal variable names | Tests only check stdout JSON keys, not internal Python variable names. |
-| Code structure | Classes vs functions. One file vs modules. Reconstructor's choice. |
-| Error message text | Harness checks exit code, not stderr. |
-| Import style | `import json` vs `from json import dumps`. Identical. |
-| Parser approach | `argparse` vs manual `sys.argv`. Both work. |
-
-### GRADIENT: Partial Preservation Creates Evolution
-
-| Information | How It Creates Diversity |
-|---|---|
-| Rule ordering | Move → bounce vs bounce → move. Different behaviors, both possibly correct. |
-| Constant precision | Dropped constant → reconstructor guesses. Wrong guess = wrong behavior = lower FF. |
-| Rule granularity | "wall_bounce" (1 rule) vs "wall_bounce_top" + "wall_bounce_bottom" (2 rules). Different token costs, different precision. |
-
-The genome is a **lossy compression** of source code. Not lossless. Preserve functional identity. Allow implementation to drift.
-
----
-
-## 8. How This Maps to Mesocosm
-
-### The Env Interface
-
-The Mesocosm platform runs an agent loop: `reset() → observation → [agent] → action → step(action) → reward → ...`.
-
-**Our mapping:**
-
-- **reset(seed):** Load Pong source code from `fixtures/pong/source.py`. Return it as observation with instructions to produce a genome JSON.
-- **step(action):** Parse the agent's action as the genome JSON. Validate it. Call GPT-4o to reconstruct code. Write to temp file. Run test harness. Return FF as reward. `terminated=True` (single-step episode).
-- **Scoring:** `episode_reward` with `mean` aggregation across episodes. Different seeds = different runs for statistical significance.
-
-### Benchinanything.json Registration
-
-```json
-{
-  "binding_vow": {
-    "observation_space": { "type": "json", "description": "source_code + instruction" },
-    "action_space": { "type": "json", "schema_ref": "<genome JSON schema>" },
-    "reward": { "type": "scalar", "range": { "low": 0.0, "high": 1.0 } },
-    "episode": { "max_steps": 1, "deterministic_reset": true }
-  },
   "scoring": {
-    "primary_metric": "functional_fidelity",
-    "metrics": [{"name": "functional_fidelity", "type": "episode_reward", "aggregation": "mean"}]
+    "primary_metric": "fidelity",
+    "higher_is_better": true,
+    "metrics": [
+      {
+        "name": "fidelity",
+        "type": "episode_reward",
+        "aggregation": "mean"
+      }
+    ]
   }
 }
 ```
 
+Because `episode_reward` with `mean` aggregation gives the average per-step reward across all episodes, which is equivalent to the mean fidelity across all generations.
+
+### Episode Structure (State Machine)
+
+```
+STATE DIAGRAM:
+
+reset() → COMPRESS (generation 1)
+
+COMPRESS:                  RECONSTRUCT:
+┌─────────────────┐       ┌─────────────────────┐
+│  obs: source     │       │  obs: genome          │
+│  action: genome  │──────▶│  action: reconstruct   │
+│                  │       │                        │
+│  reward: budget  │       │  reward: fidelity      │
+│  next: RECONSTRUCT│      │  next: COMPRESS or DONE │
+└─────────────────┘       └─────────────────────┘
+       ▲                           │
+       │                           │
+       └───────────────────────────┘
+            (next generation)
+
+DONE when generation > max_generations
+```
+
+### Source Program Library
+
+For the MVP, use a library of small Python programs. Each program:
+- 5–30 lines
+- 50–500 characters
+- Has a defined purpose (math, strings, algorithms)
+- Is self-contained (single function or small class)
+
+Categories:
+- **Math**: fibonacci, factorial, gcd, is_prime, sum_of_squares
+- **Strings**: reverse, is_palindrome, count_vowels, longest_word
+- **Algorithms**: binary_search, bubble_sort, merge_sorted, find_max
+- **Data**: flatten_list, unique_elements, count_frequency
+
+The Pong fixture (102 lines) serves as a **hard** tier program.
+
+### Compression Budget
+
+Budget scales with source length:
+```
+budget = max(20, floor(source_length × 0.6))
+```
+
+This forces meaningful compression (at least 40% reduction) while keeping a floor so very short programs are still compressible.
+
 ---
 
-## 9. File Tree
+## Phase 4: MVP Definition
+
+### What we MUST build
+
+| Component | Lines (est.) | Why |
+|---|---|---|
+| `env.py` — `SoftwareEvolutionEnv(BaseEnv)` | ~120 | The deliverable |
+| `adapter.py` — HTTP wrapper | ~15 | Required by platform |
+| `benchanything.json` — Full manifest | ~60 | Required for registration |
+| `programs.py` — Source program library | ~200 | Content for the env |
+| `fidelity.py` — Edit distance utility | ~25 | Scoring logic |
+| `requirements.txt` | ~5 | Platform dependency list |
+| `tests/test_env.py` — Smoke tests | ~80 | Reliability |
+| `LOCAL_DEV.md` — Dev guide | ~40 | Onboarding |
+
+**Total: ~545 lines of Python**
+
+### What we CUT (and why)
+
+| Component | Reason for removal |
+|---|---|
+| Dashboard / visualization | Platform provides leaderboard + replay viewer |
+| Experiment manager / `run.py` | `mesocosm run create` handles this |
+| Model adapters (`adapters/*`) | Platform handles all LLM inference via litellm |
+| Custom orchestrator (`environment.py`) | Replaced by `BaseEnv` subclass (`env.py`) |
+| Result ranking (`rank.py`) | Platform provides leaderboard |
+| Internal reconstructor (`reference.py`) | Model under test does reconstruction, not a separate GPT-4o |
+| Prompt files (`prompts/*`) | Observation descriptions in binding vow guide the agent |
+| Spec validator with re-prompt | Replaced by reward shaping in step() |
+| Database / persistence | Platform stores runs, episodes, traces |
+| Web frontend | Platform has web UI at mesocosm.swecc.org |
+| Multi-axis pressure system | Stretch goal only (budget shrinkage is in MVP) |
+
+### MVP Feature Set
+
+1. **3 generations × 2 steps = 6-step episodes** (keeps runs fast for hackathon)
+2. **30 source programs** across 4 categories, 3 difficulty tiers
+3. **Character budget** per generation (60% of source length)
+4. **Normalized edit similarity** as fidelity metric (stdlib only, no deps)
+5. **Deterministic reset** with seed for reproducibility
+6. **Structured output** action schema for Gemini/Claude/GPT
+7. **Early termination** if reconstruction fidelity = 0.0
+8. **Info traces** with generation fidelity, compression ratios
+
+### What makes this technically impressive
+
+- **Software Half-Life**: How many generations until fidelity drops below 50%? A quotable, comparable metric.
+- **Information Theory in Practice**: Measures how well different models preserve semantic content through repeated lossy compression — genuinely novel in LLM benchmarking.
+- **Model differentiation surface**: Some models may be great compressors but weak reconstructors, others balanced. The two-phase design reveals architectural differences.
+- **Compression budget metagame**: Models must strategize what information to preserve when under space constraints.
+
+### Hackathon viability (2-4 devs, 24-48 hours)
+
+| Phase | Hours | Output |
+|---|---|---|
+| Core env (`env.py` + `programs.py` + `fidelity.py`) | 8–10 | Working single-generation cycle |
+| Platform integration (`benchanything.json` + `adapter.py` + local test) | 4–6 | Valid binding vow, `mesocosm run local` works |
+| Model comparison (platform submit + 3+ model runs) | 4–6 | Score data showing differentiation |
+| Polish (more programs, edge cases, docs) | 4–6 | Submission-ready env |
+
+---
+
+## Phase 5: Repository Plan
 
 ```
 mesocosm_hackathon/
-├── fixtures/pong/
-│   ├── source.py              ✅ Headless deterministic Pong
-│   └── tests.json             ✅ 20 test scenarios
-├── test_harness.py            ✅ run_tests() + score()
+├── benchanything.json        # Manifest: binding vow, scoring, tags
+├── env.py                     # SoftwareEvolutionEnv(BaseEnv)
+├── adapter.py                 # serve(SoftwareEvolutionEnv, port=8765)
+├── programs.py                # Source program library + seeded generator
+├── fidelity.py                # normalized_edit_similarity(), token_overlap()
+├── requirements.txt           # Extra pip deps (stdlib only expected)
+├── LOCAL_DEV.md               # Dev workflow guide
+├── .gitattributes             # Git config
+├── .gitignore                 # Python gitignore
 │
-├── prompts/
-│   ├── summarizer.txt         📋 New: model-under-test prompt
-│   └── reconstructor.txt      📋 New: GPT-4o rebuild prompt
-├── adapters/
-│   ├── base.py                📋 New: AbstractModel ABC
-│   ├── deepseek.py            📋 New: DeepSeek adapter
-│   ├── claude.py              📋 New: Claude adapter
-│   └── openai.py              📋 New: OpenAI adapter
-├── reference.py               📋 New: GPT-4o reconstruct()
-├── spec_validator.py          📋 New: genome validation
-├── environment.py             📋 New: Tier 1 orchestrator
-├── run.py                     📋 New: CLI entry point
-├── rank.py                    📋 New: leaderboard
+├── fixtures/                  # Content assets (used by env at runtime)
+│   └── pong/                  # Pong: the hard-tier source program
+│       ├── source.py          #   Headless deterministic Pong (102 lines)
+│       └── tests.json         #   20 test scenarios for functional validation
 │
-├── environment_multi.py       📋 New (stretch): Tier 2 loop
-├── benchanything.json         📋 New: Mesocosm registration
+├── test_harness.py            # run_tests() + score() — imported by env.py for functional fidelity (stretch)
 │
-└── requirements.txt           📋 New: openai, anthropic
+├── showcase/                  # Demo replay exports
+│   └── README.md
+│
+└── tests/
+    ├── __init__.py
+    └── test_env.py            # pytest: reset determinism, step cycle, termination, rewards
 ```
 
-✅ = Already done. 📋 = Needs implementation.
+### File Responsibilities
+
+| File | Responsibility |
+|---|---|
+| `benchanything.json` | Full manifest: domain id, name, description, binding_vow (obs/action space specs, reward spec, episode semantics), scoring config (primary metric + aggregation), tags |
+| `env.py` | `SoftwareEvolutionEnv` class extending `BaseEnv`. State machine: `__init__`, `reset(seed)`, `step(action)`, `parse_action()`. Internal state: current phase, generation counter, stored source/genome, source library index |
+| `adapter.py` | `if __name__ == "__main__": serve(SoftwareEvolutionEnv, port=8765)` |
+| `programs.py` | `PROGRAMS: list[dict]` — each with `name`, `source`, `tier`, `category`. `get_program(seed, tier=None) -> dict` |
+| `fidelity.py` | `normalized_edit_similarity(a: str, b: str) -> float` |
+| `requirements.txt` | Lists extra packages beyond `swecc-mesocosm`. Expected: empty (`# stdlib only`) |
+| `fixtures/pong/` | Pre-built fixture. `source.py` is one of the hard-tier programs. `tests.json` enables functional scoring (stretch). |
+| `test_harness.py` | `run_tests(program_path, tests) -> results` and `score(tests, results) -> (ff, bs)`. Used inside env.py for functional fidelity scoring (stretch). |
+| `tests/test_env.py` | pytest tests: `test_deterministic_reset`, `test_compress_then_reconstruct_cycle`, `test_termination_after_max_generations`, `test_reward_range`, `test_info_types_are_strings`, `test_early_termination_on_zero_fidelity` |
+| `LOCAL_DEV.md` | Setup: `pip install swecc-mesocosm`, local dev with `mesocosm run local`, platform submit workflow, FAQ |
+
+### Files that should NOT exist
+
+- `adapters/` — platform handles model inference
+- `environment.py` / `run.py` / `rank.py` — platform does orchestration
+- `reference.py` — no internal model calls
+- `spec_validator.py` — reward shaping handles validation
+- `prompts/` — binding vow descriptions guide the agent
+- `dashboard/` / `visualization/` — platform provides UI
+- `docker-compose.yml` — platform sandboxes envs
+- `pong-game/` — GUI game is unrelated to the benchmark (keep only headless fixture)
+- `experiments/` — platform manages runs
 
 ---
 
-## 10. Implementation Order
+## Phase 6: Implementation Roadmap
 
-| Phase | Step | Depends On |
-|-------|------|------------|
-| **0** | Pong source + tests + harness | Nothing (done) |
-| **1** | `prompts/summarizer.txt` + `prompts/reconstructor.txt` | Nothing — pure text, no code dependencies |
-| **2** | `adapters/base.py` + `adapters/deepseek.py` | Nothing — pure API integration |
-| **3** | `reference.py` + `spec_validator.py` | Reconstructor prompt, OpenAI key |
-| **4** | `environment.py` | Everything above |
-| **5** | `run.py` | environment.py |
-| **6** | `rank.py` + `benchanything.json` | Results from running |
-| **7 (stretch)** | `environment_multi.py` | environment.py working |
-| **8 (stretch)** | Multi-axis pressures | Tier 2 loop working |
+### Phase 1: Core Environment (8–10 hours)
+
+**Objective**: Working `SoftwareEvolutionEnv` with single-generation verify
+
+**Tasks**:
+1. Write `fidelity.py` — `normalized_edit_similarity(a, b)` using Levenshtein distance (stdlib only)
+2. Write `programs.py` — 30 programs across 4 categories, 3 tiers
+3. Write `env.py`:
+   - `__init__`: phase tracking, generation counter, source/genome storage
+   - `reset(seed)`: pick program from library, return compress-phase observation
+   - `parse_action(action)`: route to genome or reconstruction based on phase
+   - `step(action)`: compress phase stores genome, checks budget, returns reconstruct obs. Reconstruct phase computes fidelity, advances generation, returns next obs or terminates
+   - Terminal info: `generations_completed`, `final_fidelity`, `fidelity_history`, `compression_ratios`
+4. Write `tests/test_env.py`: deterministic reset, cycle correctness, termination, reward bounds, info string types
+
+**Dependencies**: Python 3.11+, pytest
+
+**Verification**:
+```bash
+cd mesocosm_hackathon
+python -m pytest tests/ -v
+```
+
+### Phase 2: Platform Integration (4–6 hours)
+
+**Objective**: Valid benchanything.json, adapter, local test run
+
+**Tasks**:
+1. Write `benchanything.json`:
+   - `id`: `"software-evolution"`
+   - `adapter`: `"adapter.py"`
+   - `binding_vow`: version `1.0.0`, tier `tier1`
+   - `observation_space`: type `json`, with clear description
+   - `action_space`: type `json`, with `schema_ref` for structured output
+   - `reward`: type `scalar`, range `[0.0, 4.0]` (max 2 compress + 2 reconstruct steps per gen, 3 gens)
+   - `episode`: `max_steps: 6`, `deterministic_reset: true`, `supports_seed: true`
+   - `scoring`: `episode_reward` with `mean` aggregation
+   - `tags`: `["software", "evolution", "compression", "information-theory", "tier1"]`
+2. Write `adapter.py`
+3. Install `swecc-mesocosm`, test with Ollama:
+   ```bash
+   mesocosm run local --manifest benchanything.json --episodes 5
+   ```
+4. Write `LOCAL_DEV.md`
+
+**Dependencies**: Phase 1 complete, `pip install swecc-mesocosm`, Ollama with llama3.2
+
+### Phase 3: Model Comparison (4–6 hours)
+
+**Objective**: Platform submit, multi-model comparison data
+
+**Tasks**:
+1. Push repo to GitHub
+2. `mesocosm auth login`
+3. `mesocosm env submit --name "Software Evolution" --github-url https://github.com/andersonniu08-boop/mesocosm_hackathon`
+4. Wait for `status=ready`, note `domain_id`
+5. Run 3+ models at 50 episodes each:
+   ```bash
+   mesocosm run create --domain <domain_id> --vow-version 1.0.0 --model gemini/gemini-2.5-flash --episodes 50 --visibility gallery_public
+   mesocosm run create --domain <domain_id> --vow-version 1.0.0 --model gemini/gemini-2.5-pro --episodes 50 --visibility gallery_public
+   mesocosm run create --domain <domain_id> --vow-version 1.0.0 --model anthropic/claude-sonnet-4-20250514 --episodes 50 --visibility gallery_public
+   ```
+6. Export and compare: `mesocosm run export <run_id> -o showcase/replay.json`
+7. Verify score differentiation between models
+
+**Dependencies**: Phase 2 complete, swecc.org account
+
+### Phase 4: Polish (4–6 hours)
+
+**Objective**: Refine based on real model behavior
+
+**Tasks**:
+1. Tune compression budget scaling based on observed model behavior
+2. Fix edge cases discovered in real runs
+3. Add more source programs to library
+4. Expand test coverage
+5. Add Pong as hard-tier fixture (import `fixtures/pong/source.py` into program library)
+6. Optional: functional fidelity using `test_harness.py` (run reconstructed code against tests)
+
+**Dependencies**: Phase 3 results
+
+### Phase 5: Stretch Goals
+
+| Goal | Value | Effort |
+|---|---|---|
+| Functional fidelity scoring via test_harness | Higher-signal reward than string similarity | 4h |
+| Adjustable generation count (3/5/10) via scenario_params | Deeper evolution chains | 2h |
+| Multi-tier difficulty (easy/medium/hard) | Nuanced model comparison | 3h |
+| Detailed `render()` for trace output | Better demo material | 2h |
+| Mutation injection (controlled noise) | Tests robustness | 4h |
+| `requirements.txt` dep on `swecc-mesocosm` for sandbox mode | Full platform compatibility | 1h |
+
+---
+
+## Phase 7: Final Recommendation
+
+### 1. Is Software Evolution a strong Mesocosm environment?
+
+**Yes, with the redesign.** The alternating compress-reconstruct chain is genuinely novel in the Mesocosm ecosystem. Current environments test reasoning (arithmetic), strategy (game-playing), or knowledge (trivia). This tests **information theory in practice** — how well LLMs preserve semantic content through repeated lossy compression cycles.
+
+The "Software Half-Life" metric (generations until fidelity < 0.50) produces memorable, quotable numbers. Different models will exhibit different compression/degradation profiles, creating a rich comparison surface.
+
+### 2. What is the biggest technical risk?
+
+**Model compliance with the alternating phase protocol.** The model must understand it's in a multi-phase episode: sometimes compressing, sometimes reconstructing. If a model produces a reconstruction during a compress step (or vice versa), rewards collapse.
+
+**Mitigations**:
+- Clear `phase` field in every observation
+- Explicit instruction text in observation
+- Structured output schema forces correct field (`genome` vs `reconstruction`)
+- `parse_action()` ignores wrong field based on current phase
+- First few steps of each episode naturally teach the pattern
+
+**Secondary risk**: String edit distance may not correlate with functional correctness. Two syntactically different programs can be functionally identical. Mitigation: stretch goal adds functional testing via `test_harness.py` and `fixtures/pong/tests.json`.
+
+### 3. What should be removed from the current design?
+
+| Remove | Reason |
+|---|---|
+| `adapters/deepseek.py`, `adapters/claude.py`, `adapters/openai.py`, `adapters/base.py` | Platform does model inference |
+| `environment.py` (custom orchestrator) | Replaced by `BaseEnv` subclass |
+| `run.py` (CLI entry point) | `mesocosm run create` replaces this |
+| `rank.py` (leaderboard) | Platform provides leaderboard |
+| `reference.py` (GPT-4o reconstructor) | Model under test does reconstruction |
+| `spec_validator.py` (with re-prompt) | Reward shaping handles validation |
+| `prompts/summarizer.txt`, `prompts/reconstructor.txt` | Binding vow descriptions guide the agent |
+| `environment_multi.py` | Tier 2 loop integrated into single `env.py` |
+| `pong-game/` (GUI game with sounds) | Unused by benchmark |
+
+### 4. What should be added?
+
+| Add | Reason |
+|---|---|
+| `BaseEnv` subclass with `reset()` + `step()` | The only contract that matters |
+| `benchanything.json` with valid `BindingVow` | Required for platform registration |
+| `adapter.py` with `serve()` | Required HTTP endpoint |
+| `parse_action()` routing method | Handles alternating compress/reconstruct phases |
+| Source program library (`programs.py`) | Content for the env |
+| Edit distance utility (`fidelity.py`) | Scoring logic |
+| pytest smoke tests | Required for reliability |
+| `LOCAL_DEV.md` | Required for hackathon onboarding |
+
+### 5. What to build for the hackathon
+
+**The 545-line MVP (Phases 1–3).** Timeline:
+
+- **Hour 0–10**: `env.py`, `programs.py`, `fidelity.py`, tests. Local smoke test with `mesocosm run local`.
+- **Hour 10–14**: `benchanything.json`, `adapter.py`. Submit to platform. Verify env shows as `ready`.
+- **Hour 14–20**: Run 3+ models at 50 episodes each. Collect score data. Export replays.
+- **Hour 20–48**: Polish. More programs. Tune budgets. Stretch goals. Write `LOCAL_DEV.md`.
+
+The entire deliverable fits in **5 production files** (benchanything.json, env.py, adapter.py, programs.py, fidelity.py) plus tests and docs. Zero infrastructure. Zero frontend. Zero custom model code. Pure Mesocosm environment.
+
+The key insight from arithmetic-env: **an excellent Mesocosm environment should feel trivial once you understand the pattern.** The arithmetic environment is 80 lines. Software Evolution should be ~120 lines. The complexity is in the idea, not the implementation.
+
+---
+
+## Appendix A: Mesocosm Contract Checklist
+
+Before submitting, verify:
+
+- [ ] `benchanything.json` at repo root with all required keys (`id`, `adapter`, `name`, `binding_vow`, `scoring`)
+- [ ] `binding_vow.version` is valid SemVer (`1.0.0`)
+- [ ] `binding_vow.episode.max_steps` set correctly
+- [ ] `binding_vow.episode.deterministic_reset` is `true`
+- [ ] `binding_vow.episode.supports_seed` is `true`
+- [ ] `action_space.type` is `"json"` with valid `schema_ref`
+- [ ] `reward.type` is `"scalar"` or `"binary"` with valid range
+- [ ] `scoring.primary_metric` exists in `scoring.metrics` list
+- [ ] `scoring.metrics[*].type` is `"episode_reward"` or `"terminal_field"`
+- [ ] `adapter` path resolves to `adapter.py` in repo root
+- [ ] `env.py` subclasses `BaseEnv` from `bench_common.env_sdk`
+- [ ] `reset(seed)` returns JSON-serializable dict
+- [ ] `step(action)` returns `StepResult` with all required fields
+- [ ] All `info` values are strings
+- [ ] Rewards are finite floats
+- [ ] `reset(seed)` is deterministic (same seed = same initial obs)
+- [ ] `step()` terminates correctly after max steps
+- [ ] `adapter.py` uses `serve(EnvClass, ...)`
+- [ ] `requirements.txt` exists (even if empty)
+- [ ] Tested with `mesocosm run local` using Ollama
+- [ ] Tested with at least one cloud model via platform
+
+## Appendix B: Quick Reference — Env Author SDK
+
+```python
+from bench_common.env_sdk.base import BaseEnv, StepResult
+
+class MyEnv(BaseEnv):
+    def reset(self, seed=None, **params):
+        """Return initial observation dict."""
+        ...
+
+    def step(self, action):
+        """Return StepResult(observation, reward, terminated, truncated, info)."""
+        ...
+
+    def parse_action(self, action):
+        """Optional: remap action before step()."""
+        return action
+
+    def close(self):
+        """Optional: cleanup."""
+        ...
+
+    def render(self, mode="text"):
+        """Optional: human-readable snapshot."""
+        return {}
+```
+
+```python
+# adapter.py
+from bench_common.env_sdk import serve
+from env import MyEnv
+
+if __name__ == "__main__":
+    serve(MyEnv, port=8765)
+```
+
+## Appendix C: Key Differences From Old Plan
+
+| Aspect | Old Plan | New Plan |
+|---|---|---|
+| Architecture | Multi-model pipeline with internal model calls | Single-agent, multi-step Mesocosm env |
+| Model calls | Env calls DeepSeek (summarizer) + GPT-4o (reconstructor) | Platform calls ONE model per step |
+| Code organization | `environment.py` orchestrator + adapters + run.py + rank.py | `env.py` (BaseEnv subclass) + `adapter.py` |
+| Episode structure | 1-step: model produces genome, env handles everything else | 6-step: model alternates compress/reconstruct |
+| Scoring | Custom FF + BS computation | Platform `ScoringConfig` with `episode_reward` aggregation |
+| Model support | Custom adapters per model | All models via platform's litellm integration |
+| Delivery | Custom benchmark harness | `mesocosm env submit` → platform-registered domain |
